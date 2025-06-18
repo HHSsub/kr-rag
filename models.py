@@ -1,5 +1,5 @@
 """
-Korean Grammar RAG System - LLM Model Wrappers
+Korean Grammar RAG System - LLM Model Wrappers (A100 최적화 버전)
 태스크별 최적화된 Hugging Face 모델들을 관리하는 클래스들
 """
 
@@ -9,11 +9,33 @@ from sentence_transformers import SentenceTransformer
 import warnings
 warnings.filterwarnings('ignore')
 
+# A100 최적화를 위한 imports
+try:
+    from utils import MemoryManager
+except ImportError:
+    class MemoryManager:
+        @staticmethod
+        def check_memory_status():
+            return {'usage_ratio': 0.5}
+        @staticmethod
+        def clear_gpu_memory():
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
 # bitsandbytes 완전 비활성화
 BITSANDBYTES_AVAILABLE = False
 
 class ModelConfig:
-    """모델 설정 관리"""
+    """A100 최적화 모델 설정 관리"""
+    
+    def __init__(self):
+        # A100 최적화 설정
+        self.device_map = "auto"
+        self.torch_dtype = torch.float16  # bfloat16 대신 float16 사용
+        self.low_cpu_mem_usage = True
+        self.load_in_8bit = True  # 8비트 양자화 사용
+        self.max_memory = {0: "35GB"}  # A100의 80% 사용
+        self.trust_remote_code = True
     
     # PyTorch 데이터 타입
     TORCH_DTYPE = torch.float16
@@ -37,50 +59,57 @@ class QueryRewriter:
         self.model_name = "MLP-KTLim/llama-3-Korean-Bllossom-8B"
         self.tokenizer = None
         self.model = None
-        self.loaded = False
+        self.is_loaded = False
+        self.config = ModelConfig()
 
     def load_model(self):
-        """모델 로딩 (지연 로딩)"""
-        if self.loaded:
+        """A100 최적화 모델 로딩"""
+        if self.is_loaded:
             return
 
         print(f"🔄 Loading Query Rewriter: {self.model_name}")
 
         try:
+            # 메모리 체크
+            MemoryManager.check_memory_status()
+            
+            # 이전 모델 정리
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+            MemoryManager.clear_gpu_memory()
+
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            # 모델 로딩 설정
-            model_kwargs = {
-                "device_map": "auto",
-                "torch_dtype": ModelConfig.TORCH_DTYPE,
-                "trust_remote_code": True
-            }
-            
-            if ModelConfig.QUANTIZATION_CONFIG is not None:
-                model_kwargs["quantization_config"] = ModelConfig.QUANTIZATION_CONFIG
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                **model_kwargs
+                device_map=self.config.device_map,
+                torch_dtype=self.config.torch_dtype,
+                low_cpu_mem_usage=self.config.low_cpu_mem_usage,
+                load_in_8bit=self.config.load_in_8bit,
+                max_memory=self.config.max_memory,
+                trust_remote_code=self.config.trust_remote_code
             )
 
             # 패딩 토큰 설정
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.loaded = True
-            print("✅ Query Rewriter loaded successfully")
+            self.is_loaded = True
+            print(f"✅ {self.model_name} 로드 완료")
             
         except Exception as e:
-            print(f"❌ Query Rewriter 로딩 실패: {e}")
-            self.loaded = False
+            print(f"❌ 모델 로딩 실패: {e}")
+            self.is_loaded = False
+            MemoryManager.clear_gpu_memory()
 
     def rewrite_query(self, question):
         """쿼리 재작성 및 확장"""
-        if not self.loaded:
+        if not self.is_loaded:
             self.load_model()
             
-        if not self.loaded:
+        if not self.is_loaded:
             return question  # 로딩 실패 시 원본 반환
 
         prompt = f"""다음 한국어 어문 규범 질문을 다양한 표현으로 확장해 주세요.
@@ -120,28 +149,38 @@ class KoreanEmbedder:
     def __init__(self):
         self.model_name = "jhgan/ko-sbert-sts"
         self.model = None
-        self.loaded = False
+        self.is_loaded = False
+        self.config = ModelConfig()
 
     def load_model(self):
-        """모델 로딩"""
-        if self.loaded:
+        """A100 최적화 모델 로딩"""
+        if self.is_loaded:
             return
 
         print(f"🔄 Loading Korean Embedder: {self.model_name}")
         try:
+            # 메모리 체크
+            MemoryManager.check_memory_status()
+            
+            # 이전 모델 정리
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            MemoryManager.clear_gpu_memory()
+            
             self.model = SentenceTransformer(self.model_name)
-            self.loaded = True
-            print("✅ Korean Embedder loaded successfully")
+            self.is_loaded = True
+            print(f"✅ {self.model_name} 로드 완료")
         except Exception as e:
-            print(f"❌ Korean Embedder 로딩 실패: {e}")
-            self.loaded = False
+            print(f"❌ 모델 로딩 실패: {e}")
+            self.is_loaded = False
+            MemoryManager.clear_gpu_memory()
 
     def encode(self, texts):
         """텍스트 임베딩"""
-        if not self.loaded:
+        if not self.is_loaded:
             self.load_model()
             
-        if not self.loaded:
+        if not self.is_loaded:
             # 임베딩 실패 시 랜덤 벡터 반환
             import numpy as np
             if isinstance(texts, str):
@@ -166,48 +205,56 @@ class RankRAGModel:
         self.model_name = "dnotitia/Llama-DNA-1.0-8B-Instruct"
         self.tokenizer = None
         self.model = None
-        self.loaded = False
+        self.is_loaded = False
+        self.config = ModelConfig()
 
     def load_model(self):
-        """모델 로딩"""
-        if self.loaded:
+        """A100 최적화 모델 로딩"""
+        if self.is_loaded:
             return
 
         print(f"🔄 Loading RankRAG Model: {self.model_name}")
 
         try:
+            # 메모리 체크
+            MemoryManager.check_memory_status()
+            
+            # 이전 모델 정리
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+            MemoryManager.clear_gpu_memory()
+
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            model_kwargs = {
-                "device_map": "auto",
-                "torch_dtype": ModelConfig.TORCH_DTYPE,
-                "trust_remote_code": True
-            }
-            
-            if ModelConfig.QUANTIZATION_CONFIG is not None:
-                model_kwargs["quantization_config"] = ModelConfig.QUANTIZATION_CONFIG
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                **model_kwargs
+                device_map=self.config.device_map,
+                torch_dtype=self.config.torch_dtype,
+                low_cpu_mem_usage=self.config.low_cpu_mem_usage,
+                load_in_8bit=self.config.load_in_8bit,
+                max_memory=self.config.max_memory,
+                trust_remote_code=self.config.trust_remote_code
             )
 
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.loaded = True
-            print("✅ RankRAG Model loaded successfully")
+            self.is_loaded = True
+            print(f"✅ {self.model_name} 로드 완료")
             
         except Exception as e:
-            print(f"❌ RankRAG Model 로딩 실패: {e}")
-            self.loaded = False
+            print(f"❌ 모델 로딩 실패: {e}")
+            self.is_loaded = False
+            MemoryManager.clear_gpu_memory()
 
     def rank_and_generate(self, question, contexts, question_type="선택형"):
         """컨텍스트 랭킹 + 답변 생성"""
-        if not self.loaded:
+        if not self.is_loaded:
             self.load_model()
             
-        if not self.loaded:
+        if not self.is_loaded:
             # 모델 로딩 실패 시 기본 답변
             return f'"{question}에 대한 답변"이 옳다. 모델 로딩 실패로 인한 기본 답변입니다.'
 
@@ -260,48 +307,56 @@ class GuidedRankSelector:
         self.model_name = "KRAFTON/KORani-v3-13B"
         self.tokenizer = None
         self.model = None
-        self.loaded = False
+        self.is_loaded = False
+        self.config = ModelConfig()
 
     def load_model(self):
-        """모델 로딩"""
-        if self.loaded:
+        """A100 최적화 모델 로딩"""
+        if self.is_loaded:
             return
 
         print(f"🔄 Loading Guided Rank Selector: {self.model_name}")
 
         try:
+            # 메모리 체크
+            MemoryManager.check_memory_status()
+            
+            # 이전 모델 정리
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+            MemoryManager.clear_gpu_memory()
+
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            model_kwargs = {
-                "device_map": "auto",
-                "torch_dtype": ModelConfig.TORCH_DTYPE,
-                "trust_remote_code": True
-            }
-            
-            if ModelConfig.QUANTIZATION_CONFIG is not None:
-                model_kwargs["quantization_config"] = ModelConfig.QUANTIZATION_CONFIG
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                **model_kwargs
+                device_map=self.config.device_map,
+                torch_dtype=self.config.torch_dtype,
+                low_cpu_mem_usage=self.config.low_cpu_mem_usage,
+                load_in_8bit=self.config.load_in_8bit,
+                max_memory=self.config.max_memory,
+                trust_remote_code=self.config.trust_remote_code
             )
 
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.loaded = True
-            print("✅ Guided Rank Selector loaded successfully")
+            self.is_loaded = True
+            print(f"✅ {self.model_name} 로드 완료")
             
         except Exception as e:
-            print(f"❌ Guided Rank Selector 로딩 실패: {e}")
-            self.loaded = False
+            print(f"❌ 모델 로딩 실패: {e}")
+            self.is_loaded = False
+            MemoryManager.clear_gpu_memory()
 
     def explain_context_ranking(self, question, contexts):
         """컨텍스트 중요도 설명 생성"""
-        if not self.loaded:
+        if not self.is_loaded:
             self.load_model()
             
-        if not self.loaded:
+        if not self.is_loaded:
             return "모델 로딩 실패로 인해 컨텍스트 중요도 분석을 수행할 수 없습니다."
 
         context_list = ""
@@ -359,48 +414,56 @@ class FinalAnswerGenerator:
         self.model_name = "yanolja/EEVE-Korean-10.8B-v1.0"
         self.tokenizer = None
         self.model = None
-        self.loaded = False
+        self.is_loaded = False
+        self.config = ModelConfig()
 
     def load_model(self):
-        """모델 로딩"""
-        if self.loaded:
+        """A100 최적화 모델 로딩"""
+        if self.is_loaded:
             return
 
         print(f"🔄 Loading Final Answer Generator: {self.model_name}")
 
         try:
+            # 메모리 체크
+            MemoryManager.check_memory_status()
+            
+            # 이전 모델 정리
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+            MemoryManager.clear_gpu_memory()
+
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            model_kwargs = {
-                "device_map": "auto",
-                "torch_dtype": ModelConfig.TORCH_DTYPE,
-                "trust_remote_code": True
-            }
-            
-            if ModelConfig.QUANTIZATION_CONFIG is not None:
-                model_kwargs["quantization_config"] = ModelConfig.QUANTIZATION_CONFIG
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                **model_kwargs
+                device_map=self.config.device_map,
+                torch_dtype=self.config.torch_dtype,
+                low_cpu_mem_usage=self.config.low_cpu_mem_usage,
+                load_in_8bit=self.config.load_in_8bit,
+                max_memory=self.config.max_memory,
+                trust_remote_code=self.config.trust_remote_code
             )
 
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.loaded = True
-            print("✅ Final Answer Generator loaded successfully")
+            self.is_loaded = True
+            print(f"✅ {self.model_name} 로드 완료")
             
         except Exception as e:
-            print(f"❌ Final Answer Generator 로딩 실패: {e}")
-            self.loaded = False
+            print(f"❌ 모델 로딩 실패: {e}")
+            self.is_loaded = False
+            MemoryManager.clear_gpu_memory()
 
     def generate_final_answer(self, question, question_type, selected_contexts, context_explanation):
         """최종 답변 생성"""
-        if not self.loaded:
+        if not self.is_loaded:
             self.load_model()
             
-        if not self.loaded:
+        if not self.is_loaded:
             return f'"{question}에 대한 답변"이 옳다. 모델 로딩 실패로 인한 기본 답변입니다.'
 
         contexts_text = ""

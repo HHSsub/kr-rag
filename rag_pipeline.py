@@ -1,5 +1,5 @@
 """
-Korean Grammar RAG System - Complete Pipeline Implementation
+Korean Grammar RAG System - Complete Pipeline Implementation (A100 최적화 버전)
 전체 RAG 파이프라인을 통합한 메인 시스템
 """
 
@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 
 class KoreanGrammarRAGSystem:
     """
-    Complete Korean Grammar RAG System
+    Complete Korean Grammar RAG System (A100 최적화 버전)
     한국어 어문 규범 RAG 시스템 - 전체 파이프라인 통합
     """
 
@@ -53,7 +53,57 @@ class KoreanGrammarRAGSystem:
         # 지식 베이스
         self.knowledge_chunks = []
 
+        # A100 최적화를 위한 모델 관리
+        self.models = {
+            'query_rewriter': self.query_rewriter,
+            'embedder': self.embedder,
+            'rankrag': self.rankrag_model,
+            'guided_selector': self.guided_selector,
+            'final_generator': self.final_generator
+        }
+        self.current_model = None
+
         print(f"🚀 Korean Grammar RAG System initialized (LLM: {enable_llm})")
+
+    def load_model_on_demand(self, model_name):
+        """필요할 때만 모델 로드"""
+        if not self.enable_llm or model_name not in self.models:
+            return False
+            
+        # 현재 모델과 다르면 정리하고 새로 로드
+        if self.current_model != model_name:
+            if self.current_model:
+                self.unload_current_model()
+            
+            model = self.models[model_name]
+            if model:
+                try:
+                    model.load_model()
+                    if model.is_loaded:
+                        self.current_model = model_name
+                        print(f"✅ {model_name} loaded successfully")
+                        return True
+                except Exception as e:
+                    print(f"❌ {model_name} 로딩 실패: {e}")
+                    MemoryManager.clear_gpu_memory()
+                    return False
+        else:
+            return self.models[model_name].is_loaded if self.models[model_name] else False
+        
+        return False
+    
+    def unload_current_model(self):
+        """현재 모델 언로드"""
+        if self.current_model and self.current_model in self.models:
+            model = self.models[self.current_model]
+            if model and hasattr(model, 'model'):
+                del model.model
+                if hasattr(model, 'tokenizer'):
+                    del model.tokenizer
+                model.is_loaded = False
+        
+        MemoryManager.clear_gpu_memory()
+        self.current_model = None
 
     def load_knowledge_base(self, train_data_path: str):
         """지식 베이스 구축"""
@@ -66,15 +116,23 @@ class KoreanGrammarRAGSystem:
         self.knowledge_chunks = DataLoader.create_knowledge_chunks_from_data(train_data)
 
         # 하이브리드 검색기 초기화
-        embedder = self.embedder if self.enable_llm else None
+        embedder = None
+        if self.enable_llm and self.embedder:
+            # 메모리 체크 후 임베더 로드 결정
+            memory_status = MemoryManager.check_memory_status()
+            if memory_status.get('usage_ratio', 1.0) < 0.7:  # 70% 미만일 때만
+                embedder = self.embedder
+        
         self.hybrid_retriever = HybridRetriever(self.knowledge_chunks, embedder)
 
         print(f"✅ Knowledge base loaded: {len(self.knowledge_chunks)} chunks")
 
         if self.enable_llm and self.embedder:
             print("🔄 Building dense embeddings...")
-            # 임베딩 미리 로드
-            self.embedder.load_model()
+            # 임베딩 미리 로드 (메모리 허용시)
+            if self.load_model_on_demand('embedder'):
+                # 로드 후 바로 언로드 (검색시 필요하면 다시 로드)
+                self.unload_current_model()
 
     def enhance_query(self, question: str) -> List[str]:
         """쿼리 향상 및 확장"""
@@ -88,12 +146,13 @@ class KoreanGrammarRAGSystem:
         option_expanded = KoreanTextProcessor.expand_query_with_options(question)
         enhanced_queries.extend(option_expanded)
 
-        # 3. LLM 기반 쿼리 재작성 (HyDE)
+        # 3. LLM 기반 쿼리 재작성 (HyDE) - 메모리 안전
         if self.enable_llm and self.query_rewriter:
             try:
-                llm_expanded = self.query_rewriter.rewrite_query(question)
-                if llm_expanded and llm_expanded != question:
-                    enhanced_queries.append(llm_expanded)
+                if self.load_model_on_demand('query_rewriter'):
+                    llm_expanded = self.query_rewriter.rewrite_query(question)
+                    if llm_expanded and llm_expanded != question:
+                        enhanced_queries.append(llm_expanded)
             except Exception as e:
                 print(f"⚠️ Query rewriting failed: {e}")
 
@@ -141,8 +200,11 @@ class KoreanGrammarRAGSystem:
             return "컨텍스트 분석을 위한 LLM이 로드되지 않았습니다."
 
         try:
-            explanation = self.guided_selector.explain_context_ranking(question, contexts[:3])
-            return explanation
+            if self.load_model_on_demand('guided_selector'):
+                explanation = self.guided_selector.explain_context_ranking(question, contexts[:3])
+                return explanation
+            else:
+                return "컨텍스트 중요도 분석 모델 로딩 실패"
         except Exception as e:
             print(f"⚠️ LLM guided ranking failed: {e}")
             return f"컨텍스트 랭킹 중 오류 발생: {str(e)}"
@@ -153,8 +215,11 @@ class KoreanGrammarRAGSystem:
             return self._generate_template_answer(question, question_type, contexts)
 
         try:
-            answer = self.rankrag_model.rank_and_generate(question, contexts, question_type)
-            return answer
+            if self.load_model_on_demand('rankrag'):
+                answer = self.rankrag_model.rank_and_generate(question, contexts, question_type)
+                return answer
+            else:
+                return self._generate_template_answer(question, question_type, contexts)
         except Exception as e:
             print(f"⚠️ RankRAG generation failed: {e}")
             return self._generate_template_answer(question, question_type, contexts)
@@ -166,13 +231,55 @@ class KoreanGrammarRAGSystem:
             return self._generate_template_answer(question, question_type, selected_contexts)
 
         try:
-            answer = self.final_generator.generate_final_answer(
-                question, question_type, selected_contexts, context_explanation
-            )
-            return answer
+            if self.load_model_on_demand('final_generator'):
+                answer = self.final_generator.generate_final_answer(
+                    question, question_type, selected_contexts, context_explanation
+                )
+                return answer
+            else:
+                return self._generate_template_answer(question, question_type, selected_contexts)
         except Exception as e:
             print(f"⚠️ Final answer generation failed: {e}")
             return self._generate_template_answer(question, question_type, selected_contexts)
+
+    def generate_answer_sequential(self, question_data, contexts):
+        """순차적 답변 생성 (메모리 절약)"""
+        question = question_data.get('question', '')
+        question_type = question_data.get('question_type', '선택형')
+        
+        try:
+            # 1차 시도: RankRAG
+            if self.load_model_on_demand('rankrag'):
+                answer = self.rankrag_model.rank_and_generate(question, contexts, question_type)
+                if answer and len(answer.strip()) > 10:
+                    return answer
+        except Exception as e:
+            print(f"❌ RankRAG 실패: {e}")
+        
+        try:
+            # 2차 시도: Final Answer Generator
+            if self.load_model_on_demand('final_generator'):
+                answer = self.final_generator.generate_final_answer(
+                    question, question_type, contexts[:3], ""
+                )
+                if answer and len(answer.strip()) > 10:
+                    return answer
+        except Exception as e:
+            print(f"❌ Final Generator 실패: {e}")
+        
+        # 3차 시도: 템플릿 기반
+        return self.generate_template_answer(question_data, contexts)
+
+    def generate_template_answer(self, question_data, contexts):
+        """템플릿 기반 fallback 답변"""
+        question = question_data.get('question', '')
+        question_type = question_data.get('question_type', '선택형')
+        return self._generate_template_answer(question, question_type, contexts)
+
+    def generate_fallback_answer(self, question_data):
+        """최종 fallback 답변"""
+        question = question_data.get('question', '')
+        return f"질문 처리 중 오류가 발생했습니다. 질문: {question[:50]}..."
 
     def _generate_template_answer(self, question: str, question_type: str, contexts: List[Dict]) -> str:
         """템플릿 기반 답변 생성 (LLM 없이)"""
@@ -235,7 +342,7 @@ class KoreanGrammarRAGSystem:
             print("🔄 Step 5: RankRAG Answer Generation")
             rankrag_answer = self.generate_answer_with_rankrag(
                 question, question_type, reranked_contexts[:5]
-            )
+                        )
             results['rankrag_answer'] = rankrag_answer
 
             # 6. 최종 답변 생성
@@ -260,7 +367,65 @@ class KoreanGrammarRAGSystem:
             print(f"❌ Error processing question: {e}")
             results['error'] = str(e)
 
+        finally:
+            # 항상 메모리 정리
+            self.unload_current_model()
+
         return results
+
+    def process_question_optimized(self, question_data):
+        """순차적 처리로 메모리 절약"""
+        try:
+            # 1단계: 쿼리 재작성 (필요시만)
+            enhanced_query = self.enhance_query_if_needed(question_data['question'])
+            
+            # 2단계: 검색
+            contexts = self.retrieve_contexts(enhanced_query)
+            
+            # 3단계: 순차적 답변 생성
+            answer = self.generate_answer_sequential(question_data, contexts)
+            
+            return {
+                'predicted_answer': answer,
+                'contexts_used': len(contexts)
+            }
+            
+        except Exception as e:
+            print(f"❌ 처리 중 오류: {e}")
+            # Fallback 답변
+            return {
+                'predicted_answer': self.generate_fallback_answer(question_data),
+                'contexts_used': 0
+            }
+        finally:
+            # 항상 메모리 정리
+            self.unload_current_model()
+
+    def enhance_query_if_needed(self, question: str) -> List[str]:
+        """필요시에만 쿼리 향상"""
+        enhanced_queries = []
+        
+        # 기본 쿼리 정규화
+        normalized_query = KoreanTextProcessor.normalize_korean_text(question)
+        enhanced_queries.append(normalized_query)
+
+        # 선택지 확장
+        option_expanded = KoreanTextProcessor.expand_query_with_options(question)
+        enhanced_queries.extend(option_expanded)
+
+        # 메모리 여유가 있을 때만 LLM 쿼리 재작성
+        memory_status = MemoryManager.check_memory_status()
+        if memory_status.get('usage_ratio', 1.0) < 0.6:  # 60% 미만일 때만
+            if self.enable_llm and self.query_rewriter:
+                try:
+                    if self.load_model_on_demand('query_rewriter'):
+                        llm_expanded = self.query_rewriter.rewrite_query(question)
+                        if llm_expanded and llm_expanded != question:
+                            enhanced_queries.append(llm_expanded)
+                except Exception as e:
+                    print(f"⚠️ Query rewriting skipped: {e}")
+
+        return list(dict.fromkeys(enhanced_queries))
 
     def evaluate_on_dataset(self, test_data_path: str, output_path: str = None, 
                            max_samples: int = None) -> Dict[str, float]:
@@ -281,6 +446,9 @@ class KoreanGrammarRAGSystem:
             question = sample['input']['question']
             question_type = sample['input']['question_type']
             ground_truth = sample.get('output', {}).get('answer', '')
+
+            # 메모리 체크 및 자동 정리
+            MemoryManager.auto_cleanup_if_needed()
 
             # 질문 처리
             result = self.process_question(question, question_type)
@@ -308,8 +476,11 @@ class KoreanGrammarRAGSystem:
             results.append(sample_result)
 
             # 메모리 정리 (주기적으로)
-            if i % 10 == 0:
+            if i % 5 == 0:  # 5개마다 정리
                 MemoryManager.clear_gpu_memory()
+                # 중간 저장
+                if output_path:
+                    DataLoader.save_intermediate_results(results, output_path, i+1)
 
         # 평가 지표 계산
         accuracy = correct_predictions / total_predictions if ground_truth else 0.0
@@ -343,24 +514,23 @@ class KoreanGrammarRAGSystem:
     def cleanup(self):
         """시스템 정리"""
         print("🧹 Cleaning up system resources...")
-        MemoryManager.clear_gpu_memory()
+        
+        # 현재 로드된 모델 언로드
+        self.unload_current_model()
+        
+        # 강제 메모리 정리
+        MemoryManager.clear_gpu_memory(force=True)
 
         # 모델들 메모리에서 제거
-        if hasattr(self, 'query_rewriter') and self.query_rewriter:
-            self.query_rewriter.model = None
-            self.query_rewriter.tokenizer = None
-
-        if hasattr(self, 'rankrag_model') and self.rankrag_model:
-            self.rankrag_model.model = None
-            self.rankrag_model.tokenizer = None
-
-        if hasattr(self, 'guided_selector') and self.guided_selector:
-            self.guided_selector.model = None
-            self.guided_selector.tokenizer = None
-
-        if hasattr(self, 'final_generator') and self.final_generator:
-            self.final_generator.model = None
-            self.final_generator.tokenizer = None
+        for model_name, model in self.models.items():
+            if model and hasattr(model, 'model'):
+                try:
+                    del model.model
+                    if hasattr(model, 'tokenizer'):
+                        del model.tokenizer
+                    model.is_loaded = False
+                except:
+                    pass
 
         print("✅ Cleanup completed")
 

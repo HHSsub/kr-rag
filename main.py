@@ -75,16 +75,22 @@ def demo_mode():
             def process_demo():
                 return rag_system.process_question(demo['question'], demo['type'])
             
-            result = MemoryManager.safe_model_operation(process_demo)
             processing_time = time.time() - start_time
 
+            try:
+                result = rag_system.process_question_optimized(question_data)
+            except Exception as e:
+                print(f"❌ 질문 처리 실패: {e}")
+                result = None
+            
             if result:
-                answer = result.get('final_answer') or result.get('rankrag_answer') or "처리 중 오류 발생"
-                print(f"A: {answer}")
-                print(f"⏱️  Processing time: {processing_time:.2f}s")
-                print(f"📊 Contexts used: {len(result.get('reranked_contexts', []))}")
-            else:
-                print("❌ 처리 실패 - 메모리 부족 또는 오류")
+                # 결과 저장
+                sample_result = {
+                    'id': item.get('id', f'sample_{i}'),
+                    'input': item['input'],
+                    'predicted_answer': result.get('predicted_answer') or "처리 실패",
+                    'contexts_used': result.get('contexts_used', 0)
+                }
 
             # 강제 메모리 정리
             MemoryManager.clear_gpu_memory(force=True)

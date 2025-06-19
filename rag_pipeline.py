@@ -65,6 +65,13 @@ class KoreanGrammarRAGSystem:
 
         print(f"🚀 Korean Grammar RAG System initialized (LLM: {enable_llm})")
 
+
+    def cleanup(self):
+        """
+        리소스 정리가 필요하다면 여기에 작성. 없으면 패스.
+        """
+        pass
+    
     def load_model_on_demand(self, model_name):
         """필요할 때만 모델 로드"""
         if not self.enable_llm or model_name not in self.models:

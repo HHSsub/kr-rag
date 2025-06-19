@@ -73,32 +73,32 @@ class KoreanGrammarRAGSystem:
         pass
 
     def process_question_optimized(self, question_data):
-    """순차적 처리로 메모리 절약"""
-    try:
-        question = question_data.get('question', '')
-        question_type = question_data.get('question_type', '선택형')
-        
-        print(f"🔄 질문 처리 시작: {question[:50]}...")
-        
-        # 기본 process_question 호출
-        result = self.process_question(question, question_type)
-        
-        # 결과에서 답변 추출
-        final_answer = result.get('final_answer') or result.get('rankrag_answer')
-        
-        # 답변이 없거나 너무 짧으면 fallback
-        if not final_answer or len(final_answer.strip()) < 5:
-            print("❌ 답변 생성 실패, fallback 답변 생성")
-            final_answer = self.generate_fallback_answer(question_data)
-        
-        contexts_used = len(result.get('reranked_contexts', []))
-        
-        print(f"✅ 답변 생성 완료: {final_answer[:100]}...")
-        
-        return {
-            'predicted_answer': final_answer,
-            'contexts_used': contexts_used
-        }
+        """순차적 처리로 메모리 절약"""
+        try:
+            question = question_data.get('question', '')
+            question_type = question_data.get('question_type', '선택형')
+            
+            print(f"🔄 질문 처리 시작: {question[:50]}...")
+            
+            # 기본 process_question 호출
+            result = self.process_question(question, question_type)
+            
+            # 결과에서 답변 추출
+            final_answer = result.get('final_answer') or result.get('rankrag_answer')
+            
+            # 답변이 없거나 너무 짧으면 fallback
+            if not final_answer or len(final_answer.strip()) < 5:
+                print("❌ 답변 생성 실패, fallback 답변 생성")
+                final_answer = self.generate_fallback_answer(question_data)
+            
+            contexts_used = len(result.get('reranked_contexts', []))
+            
+            print(f"✅ 답변 생성 완료: {final_answer[:100]}...")
+            
+            return {
+                'predicted_answer': final_answer,
+                'contexts_used': contexts_used
+            }
         
     except Exception as e:
         print(f"❌ 처리 중 오류: {e}")

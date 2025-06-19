@@ -70,7 +70,21 @@ class KoreanGrammarRAGSystem:
         """
         리소스 정리가 필요하다면 여기에 작성. 없으면 패스.
         """
-        pass
+        try:
+            # 모든 모델 정리
+            for model_name, model in self.models.items():
+                if model is not None:
+                    del model
+            
+            # 기타 리소스 정리
+            if hasattr(self, 'hybrid_retriever') and self.hybrid_retriever:
+                del self.hybrid_retriever
+                
+            import gc
+            gc.collect()
+            print("🧹 시스템 리소스 정리 완료")
+        except Exception as e:
+            print(f"⚠️ 리소스 정리 중 오류: {e}")
 
     def process_question_optimized(self, question_data):
         """순차적 처리로 메모리 절약"""
@@ -99,23 +113,23 @@ class KoreanGrammarRAGSystem:
                 'predicted_answer': final_answer,
                 'contexts_used': contexts_used
             }
-        
-    except Exception as e:
-        print(f"❌ 처리 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # fallback 답변
-        return {
-            'predicted_answer': self.generate_fallback_answer(question_data),
-            'contexts_used': 0
-        }
-    finally:
-        # 항상 메모리 정리
-        try:
-            self.unload_current_model()
-        except:
-            pass
+            
+        except Exception as e:  # ✅ try와 동일한 들여쓰기 레벨 (4칸)
+            print(f"❌ 처리 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # fallback 답변
+            return {
+                'predicted_answer': self.generate_fallback_answer(question_data),
+                'contexts_used': 0
+            }
+        finally:  # ✅ try와 동일한 들여쓰기 레벨 (4칸)
+            # 항상 메모리 정리
+            try:
+                self.unload_current_model()
+            except:
+                pass
     
     def load_model_on_demand(self, model_name):
         """필요할 때만 모델 로드"""
@@ -145,17 +159,29 @@ class KoreanGrammarRAGSystem:
         return False
     
     def unload_current_model(self):
-        """현재 모델 언로드"""
-        if self.current_model and self.current_model in self.models:
-            model = self.models[self.current_model]
-            if model and hasattr(model, 'model'):
-                del model.model
-                if hasattr(model, 'tokenizer'):
-                    del model.tokenizer
-                model.is_loaded = False
-        
-        MemoryManager.clear_gpu_memory()
-        self.current_model = None
+        """현재 모델 언로드 메서드"""
+        try:
+            if self.current_model:
+                del self.current_model
+                self.current_model = None
+                
+            # GPU 메모리 정리
+            import gc
+            gc.collect()
+            
+            # CUDA 메모리 정리 (사용 가능한 경우)
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print("🧹 CUDA 메모리 정리 완료")
+            except ImportError:
+                pass
+                
+            print("🧹 모델 메모리 정리 완료")
+            
+        except Exception as e:
+            print(f"⚠️ 모델 정리 중 오류: {e}")
 
     def load_knowledge_base(self, train_data_path: str):
         """지식 베이스 구축"""
